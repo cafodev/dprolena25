@@ -5,7 +5,10 @@ from langchain_core.runnables import RunnablePassthrough
 from langchain_core.output_parsers import StrOutputParser
 from langchain.retrievers.multi_query import MultiQueryRetriever
 from langchain.retrievers import EnsembleRetriever
+from langchain_community.document_loaders import PyPDFLoader
+from langchain_text_splitters import RecursiveCharacterTextSplitter
 import streamlit as st
+import os
 
 from config import *
 from prompts import *
@@ -18,6 +21,14 @@ def initialize_rag_system():
         embedding_function=OpenAIEmbeddings(model=EMBEDDING_MODEL),\
         persist_directory=CHROMA_DB_PATH
     )
+
+    # Verificar si la DB esta vacia e ingerir documentos si es necesario
+    try:
+        if vectorestore._collection.count() == 0:
+            with st.spinner("🚀 Inicializando base de conocimientos (esto puede tardar unos minutos)..."):
+                ingest_documents(vectorestore)
+    except Exception as e:
+        st.error(f"Error accediendo a la base de datos: {e}")
 
     # Modelos
     llm_queries = ChatOpenAI(model=QUERY_MODEL, temperature=0)
@@ -130,3 +141,53 @@ def get_retriever_info():
         "candidatos": MMR_FETCH_K,
         "umbral": SIMILARITY_THRESHOLD if ENABLE_HYBRID_SEARCH else "N/A"
     }
+
+def ingest_documents(vectorstore):
+    """Carga, divide e indexa los documentos PDF configurados."""
+    all_splits = []
+    
+    for pdf_file in PDF_FILES:
+        file_path = os.path.join(DOCUMENTS_DIR, pdf_file)
+        if not os.path.exists(file_path):
+            st.warning(f"⚠️ Archivo no encontrado: {pdf_file}")
+            continue
+            
+        st.toast(f"Procesando {pdf_file}...", icon="📄")
+        
+        # Cargar PDF
+        loader = PyPDFLoader(file_path)
+        docs = loader.load()
+        
+        # Dividir en chunks
+        text_splitter = RecursiveCharacterTextSplitter(
+            chunk_size=1000,
+            chunk_overlap=200,
+            separators=["\n\n", "\n", " ", ""]
+        )
+        splits = text_splitter.split_documents(docs)
+        
+        # Agregar metadata de origen limpia
+        for split in splits:
+            split.metadata["source"] = pdf_file
+            
+        all_splits.extend(splits)
+
+    if all_splits:
+        # Indexar en lotes para evitar problemas de memoria/limites
+        batch_size = 100
+        total_batches = len(all_splits) // batch_size + 1
+        
+        progress_bar = st.progress(0, text="Indexando documentos...")
+        
+        for i in range(0, len(all_splits), batch_size):
+            batch = all_splits[i:i + batch_size]
+            vectorstore.add_documents(batch)
+            
+            # Actualizar progreso
+            progress = min((i + batch_size) / len(all_splits), 1.0)
+            progress_bar.progress(progress, text=f"Indexando bloque {i // batch_size + 1} de {total_batches}")
+            
+        progress_bar.empty()
+        st.toast("¡Indexación completada correctamente!", icon="✅")
+    else:
+        st.warning("No se encontraron documentos para procesar.")
