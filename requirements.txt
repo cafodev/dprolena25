@@ -1,0 +1,7 @@
+reflex
+openai
+python-dotenv
+python-dotenv
+faiss-cpu
+pypdf
+tiktoken
